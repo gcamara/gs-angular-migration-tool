@@ -1,0 +1,10 @@
+{
+  "name": "@gcamara/gs-angular-migration-tool",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "bin": "./cli.js",
+  "keywords": [],
+  "author": "Gabriel Camara",
+  "license": "ISC"
+}
