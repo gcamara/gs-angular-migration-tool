@@ -5,10 +5,16 @@ const fs = require('fs');
 
 let toVersion = 12;
 let verbose = false;
+let startAfterInstall = false;
 
 const importedSync = execSync;
-execSync = (command) => {
-    importedSync(command, verbose ? { stdio: [0, 1, 2] } : null);
+execSync = async (command) => {
+    if (verbose) {
+        const ret = await importedSync(command, { stdio: 'inherit' });
+        return ret;
+    } else {
+        await importedSync(command);
+    }
 }
 
 function initLogger() {
@@ -27,6 +33,10 @@ function initLogger() {
 
 const log = initLogger();
 
+function getClearVersion(dependency) {
+    return dependency.replace('^', '').split('.')[0];
+}
+
 function getAngularDependencies(file) {
     const { dependencies, devDependencies } = JSON.parse(String(file));
 
@@ -35,7 +45,7 @@ function getAngularDependencies(file) {
 
     basicAngularDeps.forEach(dependency => {
         const name = `@angular/${dependency}`;
-        const clearVersion =  (dependencies[name] || devDependencies[name]).replace('^', '').split('.')[0];
+        const clearVersion =  getClearVersion((dependencies[name] || devDependencies[name]));
         angularDependenciesVersions = {
             ...angularDependenciesVersions,
             [name]: clearVersion
@@ -58,24 +68,20 @@ const extractTokens = () => {
             }
         }
         
-        if (val.indexOf('--verbose') > -1) {
-            try {
-                verbose = Boolean(val.split('=')[1]);
-            } catch (err) {
-                verbose = false;
-            }
-        }
+        verbose = verbose || val.indexOf('--verbose') > -1;
+        startAfterInstall = startAfterInstall || val.indexOf('--start-after-install') > -1;
     });
 
     options.push(`--verbose=${verbose}`);
     options.push(`--to-version=${toVersion}`);
+    options.push(`--start-after-install=${startAfterInstall}`);
 
     log.debug('Extracted options ', options.join(' '));
 }
 
-function updatePrimeNG() {
+async function updatePrimeNG() {
     log.debug('Upgrading PrimeNG to', toVersion);
-    const primeNgCmd = `npm i primeng@${toVersion}`;
+    const primeNgCmd = `npm i primeng@${toVersion} --force`;
     log.debug('Running', primeNgCmd);
 
     try {
@@ -97,7 +103,15 @@ const start = async () => {
         log.success('Angular upgraded to', toVersion);
         checkFilesToCommit();
         updatePrimeNG();
-        exit(0);
+
+        if (startAfterInstall) {
+            log.debug('Starting application...');
+            execSync('npm start');
+            log.success('Application started');
+        } else {
+            log.success('Upgrade finished.');
+            exit(0);
+        }
 
     } catch (err) {
         log.error('Error running upgrade', err);
@@ -113,8 +127,8 @@ async function checkFilesToCommit() {
     log.info('Checking if repo is empty...');
     execSync(`git checkout ${getBranchName()}`);
 
-    const res = String(execSync(`git status --porcelain`));
-    if (res?.trim().length) {
+    const res = execSync(`git status --porcelain`);
+    if (res && String(res)?.trim().length) {
         const verbBefore = verbose;
         log.debug('Repo is not empty, committing changes');
         verbose = false;
@@ -123,8 +137,14 @@ async function checkFilesToCommit() {
         log.success('Changes committed.');
         verbose = verbBefore;
     } else {
-        log.success('Repo is empty, moving forward');
+        log.success('Repo is empty, moving forward', res);
     }
+}
+
+function installPeerDependencies() {
+    log.debug('Installing peer dependencies...');
+    execSync('npm i --legacy-peer-deps');
+    log.success('Peer deps updated.');
 }
 
 async function updateAngularDependencies(dependencies) {
@@ -134,38 +154,51 @@ async function updateAngularDependencies(dependencies) {
         execSync(`git checkout -b ${getBranchName()}`);
     } catch (err) {
         log.info('Branch already exists... moving forward');
+        execSync(`git checkout ${getBranchName()}`);
     }
 
+    installPeerDependencies();
     checkFilesToCommit();
 
     return new Promise(resolve => {
-        let onLastVersion = 0;
-        Object.keys(dependencies).forEach((dependency) => {
-            const version = Number(dependencies[dependency]);
-            log.info('Reading dependency', dependency, '-- Current version:', version);
-    
-            if (version + 1 <= toVersion) {
-                const ngForceCommand = `ng update --force ${dependency}@${version+1}`;
-                log.debug('Updating', dependency, 'to', version + 1);
-                log.debug('Running', ngForceCommand);
-                execSync(ngForceCommand);
-                log.success('Success updating ', dependency, 'to', version + 1);
-                
-                log.debug('Commiting changes...');
-                execSync(`git add .`);
-                execSync(`git commit -m "Angular v${toVersion} - Upgrading ${dependency} to ${version + 1}"`);
-                log.success('Changes commited successfully.');
-            }
+        const keys = Object.keys(dependencies);
+        keys.forEach(dep => updateDependency(dependencies, dep));
+        
+        const onLastVersion = keys.filter(dep => {
+            const version = dependencies[dep];
+            return version === toVersion;
+        }).length;
 
-            if (version === toVersion) {
-                onLastVersion++;
-            }
-        });
-    
-        if (onLastVersion < 3) {
+
+        log.debug(onLastVersion, 'dependencies updated to', toVersion);
+        if (onLastVersion < keys.length) {
             resolve(updateAngularDependencies(dependencies));
+        } else {
+            resolve();
         }
     });
+}
+
+function updateDependency(dependencies, dependency) {
+    const version = Number(dependencies[dependency]);
+    log.info('Reading dependency', dependency, '-- Current version:', version, `${version === toVersion ? '--- Already updated. Skipping...' : ''}`);
+
+    if (version + 1 <= toVersion) {
+        const ngForceCommand = `ng update --force ${dependency}@${version+1}`;
+        log.debug('Updating', dependency, 'to', version + 1);
+        log.debug('Running', ngForceCommand);
+        execSync(ngForceCommand);
+        log.success('Success updating ', dependency, 'to', version + 1);
+        
+        installPeerDependencies();
+        log.debug('Commiting changes...');
+        execSync(`git add .`);
+        try {
+            execSync(`git commit -m "Angular v${toVersion} - Upgrading ${dependency} to ${version + 1}"`);
+        } catch (err) { }
+        log.success('Changes commited successfully.');
+        dependencies[dependency] = version+1;
+    }
 }
 
 start();
